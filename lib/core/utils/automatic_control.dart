@@ -5,35 +5,35 @@ class AutomaticControl {
 
     if (kelembapan < 50) {
       if (suhu < 35) {
-        lampu = 2;
+        lampu = 2; // 2 lampu menyala (intensitas tinggi)
         mist = 1;
       } else if (suhu <= 40) {
-        lampu = 1;
+        lampu = 1; // 1 lampu menyala (intensitas rendah)
         mist = 1;
       } else {
-        lampu = 0;
+        lampu = 0; // mati
         mist = 1;
       }
     } else if (kelembapan <= 65) {
       if (suhu < 35) {
-        lampu = 2;
+        lampu = 2; // 2 lampu menyala
         mist = 0;
       } else if (suhu <= 40) {
-        lampu = 1;
+        lampu = 1; // 1 lampu menyala
         mist = 0;
       } else {
-        lampu = 0;
+        lampu = 0; // mati
         mist = 0;
       }
     } else {
       if (suhu < 35) {
-        lampu = 3;
+        lampu = 2; // 2 lampu menyala (maksimal)
         mist = 0;
       } else if (suhu <= 40) {
-        lampu = 2;
+        lampu = 1; // 1 lampu menyala
         mist = 0;
       } else {
-        lampu = 0;
+        lampu = 0; // mati
         mist = 0;
       }
     }
@@ -41,9 +41,8 @@ class AutomaticControl {
     return {'lampu': lampu, 'mist': mist};
   }
 
-  // Konversi nilai lampu (0-3) ke status boolean untuk database
+  // Konversi nilai lampu (0-2) ke status boolean untuk database
   static bool convertLampuToBoolean(int lampuValue) {
-    // Nilai 0 = mati, 1-3 = menyala dengan intensitas berbeda
     return lampuValue > 0;
   }
 
@@ -52,18 +51,17 @@ class AutomaticControl {
     return mistValue == 1;
   }
 
-  // Method untuk mendapatkan jumlah lampu yang menyala
+  // Method untuk mendapatkan jumlah lampu yang menyala (0, 1, atau 2)
   static int getJumlahLampu(int lampuValue) {
-    return lampuValue; // Nilai langsung 0, 1, 2, atau 3
+    return lampuValue.clamp(0, 2); // Pastikan tidak lebih dari 2
   }
 
-  // Method untuk mendapatkan deskripsi status
+  // Method untuk mendapatkan deskripsi status - DIUBAH untuk 2 lampu
   static Map<String, String> getStatusDescription(int lampu, int mist) {
     final lampuDescriptions = {
       0: 'Mati (0 lampu)',
       1: '1 Lampu Menyala (Intensitas Rendah)',
-      2: '2 Lampu Menyala (Intensitas Sedang)',
-      3: '3 Lampu Menyala (Intensitas Tinggi)'
+      2: '2 Lampu Menyala (Intensitas Tinggi)' // Hanya sampai 2
     };
 
     final mistDescriptions = {
@@ -77,7 +75,7 @@ class AutomaticControl {
     };
   }
 
-  // Method untuk mendapatkan rekomendasi berdasarkan kondisi
+  // Method untuk mendapatkan rekomendasi berdasarkan kondisi - DIUBAH
   static String getRecommendation(double suhu, double kelembapan) {
     final control = kontrolOtomatis(suhu, kelembapan);
     final lampu = control['lampu']!;
@@ -92,5 +90,10 @@ class AutomaticControl {
     } else {
       return 'Perlu pemanasan ($lampu lampu) dan pelembapan';
     }
+  }
+
+  // Method baru untuk validasi jumlah lampu
+  static int validateJumlahLampu(int jumlahLampu) {
+    return jumlahLampu.clamp(0, 2);
   }
 }

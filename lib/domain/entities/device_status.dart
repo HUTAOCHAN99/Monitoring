@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 class DeviceStatus {
   final int id;
   final bool statusLampu;
-  final int jumlahLampu; // Tambahkan field ini
+  final int jumlahLampu; 
   final bool statusHumidifier;
   final double targetKelembapan;
   final DateTime timestamp;
@@ -11,7 +11,7 @@ class DeviceStatus {
   const DeviceStatus({
     required this.id,
     required this.statusLampu,
-    required this.jumlahLampu, // Wajib di constructor
+    required this.jumlahLampu, 
     required this.statusHumidifier,
     required this.targetKelembapan,
     required this.timestamp,
@@ -20,7 +20,7 @@ class DeviceStatus {
   DeviceStatus copyWith({
     int? id,
     bool? statusLampu,
-    int? jumlahLampu, // Tambahkan di copyWith
+    int? jumlahLampu,
     bool? statusHumidifier,
     double? targetKelembapan,
     DateTime? timestamp,
@@ -28,7 +28,7 @@ class DeviceStatus {
     return DeviceStatus(
       id: id ?? this.id,
       statusLampu: statusLampu ?? this.statusLampu,
-      jumlahLampu: jumlahLampu ?? this.jumlahLampu, // Tambahkan ini
+      jumlahLampu: jumlahLampu ?? this.jumlahLampu, 
       statusHumidifier: statusHumidifier ?? this.statusHumidifier,
       targetKelembapan: targetKelembapan ?? this.targetKelembapan,
       timestamp: timestamp ?? this.timestamp,
@@ -36,13 +36,13 @@ class DeviceStatus {
   }
 
   // Helper methods
-  String get lightStatusText => statusLampu ? 'MENYALA ($jumlahLampu lampu)' : 'MATI';
+  String get lightStatusText => statusLampu ? 'MENYALA ($jumlahLampu/2 lampu)' : 'MATI';
   String get humidifierStatusText => statusHumidifier ? 'AKTIF' : 'MATI';
   
   Color get lightStatusColor => statusLampu ? Colors.amber : Colors.grey;
   Color get humidifierStatusColor => statusHumidifier ? Colors.blue : Colors.grey;
 
-  // Method untuk mendapatkan deskripsi jumlah lampu
+  // Method untuk mendapatkan deskripsi jumlah lampu - DIUBAH
   String get jumlahLampuDescription {
     switch (jumlahLampu) {
       case 0:
@@ -50,12 +50,15 @@ class DeviceStatus {
       case 1:
         return '1 Lampu Menyala (Rendah)';
       case 2:
-        return '2 Lampu Menyala (Sedang)';
-      case 3:
-        return '3 Lampu Menyala (Tinggi)';
+        return '2 Lampu Menyala (Tinggi)'; // Maksimal 2
       default:
         return '$jumlahLampu Lampu Menyala';
     }
+  }
+
+  // Method untuk mendapatkan intensitas lampu dalam persentase
+  double get lightIntensity {
+    return jumlahLampu / 2; // 0, 0.5, atau 1.0
   }
 
   // Method untuk menghitung status humidifier
@@ -110,16 +113,28 @@ class DeviceStatus {
     }
   }
 
-  // Method untuk mendapatkan informasi kontrol
+  // Method untuk mendapatkan informasi kontrol - DIUBAH untuk 2 lampu
   String getControlInfo(double currentHumidity, double currentTemperature) {
     if (currentHumidity < 50) {
       if (currentTemperature < 35) {
-        return 'Kontrol: $jumlahLampu Lampu=ON, Humidifier=ON\n(Suhu <35°C & Kelembapan <50%)';
+        return 'Kontrol: $jumlahLampu/2 Lampu=ON, Humidifier=ON\n(Suhu <35°C & Kelembapan <50%)';
       } else {
         return 'Kontrol: Humidifier=ON\n(Kelembapan <50%)';
       }
+    } else if (currentHumidity <= 65) {
+      if (currentTemperature < 35) {
+        return 'Kontrol: $jumlahLampu/2 Lampu=ON\n(Suhu <35°C)';
+      } else if (currentTemperature <= 40) {
+        return 'Kontrol: $jumlahLampu/2 Lampu=ON\n(Suhu 35-40°C)';
+      } else {
+        return 'Kontrol: Lampu=OFF\n(Kondisi optimal)';
+      }
     } else {
-      return 'Kontrol: Lampu=OFF, Humidifier=OFF\n(Kondisi optimal)';
+      if (currentTemperature < 35) {
+        return 'Kontrol: $jumlahLampu/2 Lampu=ON\n(Suhu <35°C & Kelembapan >65%)';
+      } else {
+        return 'Kontrol: Lampu=OFF, Humidifier=OFF\n(Kondisi optimal)';
+      }
     }
   }
 
@@ -127,7 +142,12 @@ class DeviceStatus {
     if (currentHumidity < 50) {
       if (currentTemperature < 35) return Colors.orange;
       return Colors.blue;
+    } else if (currentHumidity <= 65) {
+      if (currentTemperature < 35) return Colors.orange;
+      if (currentTemperature <= 40) return Colors.amber;
+      return Colors.green;
     } else {
+      if (currentTemperature < 35) return Colors.orange;
       return Colors.green;
     }
   }

@@ -52,7 +52,7 @@ class SensorCard extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             
-            // Status Lampu
+            // Status Lampu - DIUBAH untuk 2 lampu
             _buildLightInfo(),
             const SizedBox(height: 16),
             
@@ -106,57 +106,120 @@ class SensorCard extends StatelessWidget {
   }
 
   Widget _buildLightInfo() {
-    return Row(
+    return Column(
       children: [
-        Icon(
-          Icons.lightbulb,
-          color: deviceStatus.lightStatusColor,
-          size: 28,
-        ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Lampu',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.grey,
-                ),
+        Row(
+          children: [
+            Icon(
+              Icons.lightbulb,
+              color: deviceStatus.lightStatusColor,
+              size: 28,
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Lampu Pemanas',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey,
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      Text(
+                        // DIUBAH: Menampilkan status dengan maksimal 2 lampu
+                        deviceStatus.lightStatusText,
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: deviceStatus.lightStatusColor,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: deviceStatus.lightStatusColor.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: deviceStatus.lightStatusColor),
+                        ),
+                        child: Text(
+                          deviceStatus.statusLampu ? 'ON' : 'OFF',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: deviceStatus.lightStatusColor,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
+            ),
+          ],
+        ),
+        // DIUBAH: Menampilkan indikator progress lampu untuk 2 lampu
+        if (deviceStatus.statusLampu) ...[
+          const SizedBox(height: 12),
+          Column(
+            children: [
               Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    deviceStatus.lightStatusText,
+                    'Intensitas Pemanasan:',
                     style: TextStyle(
-                      fontSize: 18,
+                      fontSize: 12,
+                      color: Colors.grey[600],
+                    ),
+                  ),
+                  Text(
+                    '${deviceStatus.jumlahLampu}/2 lampu',
+                    style: TextStyle(
+                      fontSize: 12,
                       fontWeight: FontWeight.bold,
                       color: deviceStatus.lightStatusColor,
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: deviceStatus.lightStatusColor.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: deviceStatus.lightStatusColor),
+                ],
+              ),
+              const SizedBox(height: 6),
+              LinearProgressIndicator(
+                value: deviceStatus.lightIntensity, // 0, 0.5, atau 1.0
+                backgroundColor: Colors.grey[200],
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  deviceStatus.lightStatusColor,
+                ),
+                minHeight: 8,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Rendah',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.grey[600],
                     ),
-                    child: Text(
-                      deviceStatus.statusLampu ? 'ON' : 'OFF',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: deviceStatus.lightStatusColor,
-                        fontWeight: FontWeight.bold,
-                      ),
+                  ),
+                  Text(
+                    'Tinggi',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.grey[600],
                     ),
                   ),
                 ],
               ),
             ],
           ),
-        ),
+        ],
       ],
     );
   }

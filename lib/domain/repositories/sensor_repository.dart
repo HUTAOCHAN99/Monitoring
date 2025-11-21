@@ -1,6 +1,3 @@
-import '../entities/sensor_data.dart';
-import '../entities/device_status.dart';
-
 abstract class SensorRepository {
   // Stream untuk mendapatkan data real-time
   Stream<Map<String, dynamic>> getDataStream();
