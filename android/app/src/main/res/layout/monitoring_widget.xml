@@ -2,7 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@drawable/widget_background"
+    android:background="#202020"
     android:padding="12dp"
     android:orientation="vertical">
 
@@ -31,7 +31,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@drawable/ic_temperature"
+                android:src="@android:drawable/ic_menu_compass"
                 android:tint="#FFFFFF" />
 
             <TextView
@@ -50,7 +50,6 @@
                 android:text="Suhu"
                 android:textColor="#CCFFFFFF"
                 android:textSize="10sp" />
-
         </LinearLayout>
 
         <LinearLayout
@@ -63,7 +62,7 @@
             <ImageView
                 android:layout_width="24dp"
                 android:layout_height="24dp"
-                android:src="@drawable/ic_humidity"
+                android:src="@android:drawable/ic_menu_gallery"
                 android:tint="#FFFFFF" />
 
             <TextView
@@ -82,9 +81,7 @@
                 android:text="Kelembapan"
                 android:textColor="#CCFFFFFF"
                 android:textSize="10sp" />
-
         </LinearLayout>
-
     </LinearLayout>
 
     <TextView

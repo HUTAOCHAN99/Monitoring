@@ -20,7 +20,9 @@ class AppConstants {
       throw Exception('SUPABASE_URL is not set in .env file');
     }
     if (url == 'https://YOUR-PROJECT.supabase.co') {
-      throw Exception('Please update SUPABASE_URL in .env file with your actual Supabase URL');
+      throw Exception(
+        'Please update SUPABASE_URL in .env file with your actual Supabase URL',
+      );
     }
     if (!url.startsWith('https://') || !url.contains('.supabase.co')) {
       throw Exception('Invalid Supabase URL format: $url');
@@ -32,7 +34,9 @@ class AppConstants {
       throw Exception('SUPABASE_ANON_KEY is not set in .env file');
     }
     if (key == 'your-anon-key-here') {
-      throw Exception('Please update SUPABASE_ANON_KEY in .env file with your actual Supabase anon key');
+      throw Exception(
+        'Please update SUPABASE_ANON_KEY in .env file with your actual Supabase anon key',
+      );
     }
     if (key.length < 20) {
       throw Exception('Supabase anon key appears to be invalid');
@@ -43,4 +47,5 @@ class AppConstants {
 class AppRoutes {
   static const String home = '/';
   static const String history = '/history';
+  static const String charts = '/charts';
 }
