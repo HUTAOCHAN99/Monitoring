@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import '../../domain/repositories/sensor_repository.dart';
 import '../datasources/sensor_remote_data_source.dart';
 
@@ -20,7 +22,7 @@ class SensorRepositoryImpl implements SensorRepository {
     _usePolling = true;
     _isStreamActive = true;
     
-    print('🔄 Repository: Started 3-second polling stream');
+    _log('🔄 Repository: Started 3-second polling stream');
     return _currentStream!;
   }
 
@@ -30,25 +32,42 @@ class SensorRepositoryImpl implements SensorRepository {
     _usePolling = true;
     _isStreamActive = true;
     
-    print('🔄 Repository: Started polling stream with $intervalSeconds seconds interval');
+    _log('🔄 Repository: Started polling stream with $intervalSeconds seconds interval');
     return _currentStream!;
   }
 
   @override
-  Future<Map<String, dynamic>> fetchInitialData() {
-    print('🚀 Repository: Fetching initial data');
-    return _remoteDataSource.fetchInitialData();
+  Future<Map<String, dynamic>> fetchInitialData() async {
+    _log('🚀 Repository: Fetching initial data with retry logic');
+    
+    // Retry logic untuk initial data
+    for (int i = 0; i < 3; i++) {
+      try {
+        final data = await _remoteDataSource.fetchInitialData();
+        _log('✅ Repository: Initial data fetched successfully on attempt ${i + 1}');
+        return data;
+      } catch (e) {
+        _log('❌ Repository: Attempt ${i + 1} failed: $e');
+        if (i < 2) {
+          _log('⏳ Repository: Waiting 2 seconds before retry...');
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      }
+    }
+    
+    _log('💥 Repository: Failed to fetch initial data after 3 attempts');
+    throw Exception('Failed to fetch initial data after 3 attempts');
   }
 
   @override
   Future<List<Map<String, dynamic>>> fetchHistoricalData({int limit = 20}) {
-    print('📚 Repository: Fetching historical data (limit: $limit)');
+    _log('📚 Repository: Fetching historical data (limit: $limit)');
     return _remoteDataSource.fetchHistoricalData(limit: limit);
   }
 
   @override
   Future<bool> sendAutomaticControl(double suhu, double kelembapan) {
-    print('🎛️ Repository: Sending automatic control - Suhu: $suhu°C, Kelembapan: $kelembapan%');
+    _log('🎛️ Repository: Sending automatic control - Suhu: $suhu°C, Kelembapan: $kelembapan%');
     return _remoteDataSource.sendAutomaticControl(suhu, kelembapan);
   }
 
@@ -58,7 +77,7 @@ class SensorRepositoryImpl implements SensorRepository {
     bool? statusHumidifier,
     double? targetKelembapan,
   }) {
-    print('🔄 Repository: Sending manual control - '
+    _log('🔄 Repository: Sending manual control - '
         'Lampu: $statusLampu, Humidifier: $statusHumidifier, Target: $targetKelembapan');
     
     return _remoteDataSource.sendManualControl(
@@ -70,7 +89,7 @@ class SensorRepositoryImpl implements SensorRepository {
 
   @override
   Future<bool> checkConnection() {
-    print('🌐 Repository: Checking connection');
+    _log('🌐 Repository: Checking connection');
     return _remoteDataSource.checkConnection();
   }
 
@@ -82,11 +101,18 @@ class SensorRepositoryImpl implements SensorRepository {
 
   @override
   Future<void> dispose() async {
-    print('🛑 Repository: Disposing...');
+    _log('🛑 Repository: Disposing...');
     _remoteDataSource.dispose();
     _currentStream = null;
     _isStreamActive = false;
     _usePolling = false;
-    print('✅ Repository disposed');
+    _log('✅ Repository disposed');
+  }
+
+  // Helper method untuk logging yang aman
+  void _log(String message) {
+    if (kDebugMode) {
+      print('SensorRepositoryImpl: $message');
+    }
   }
 }

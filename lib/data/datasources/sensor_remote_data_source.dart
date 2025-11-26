@@ -26,18 +26,18 @@ class SensorRemoteDataSource {
 
   SensorRemoteDataSource() : _supabaseClient = Supabase.instance.client;
 
-  // Method utama untuk real-time data dengan optimasi sequential
+  // Method utama untuk real-time data dengan fallback ke data terbaru
   Stream<Map<String, dynamic>> getRealtimeData({int intervalSeconds = 3}) {
-    _log('🔄 Starting optimized realtime data polling every $intervalSeconds seconds');
+    _log('🔄 Starting realtime data polling every $intervalSeconds seconds');
 
     final controller = StreamController<Map<String, dynamic>>.broadcast();
 
     // Fetch data pertama kali
-    _fetchOptimizedData(controller);
+    _fetchDataWithFallback(controller);
 
-    // Setup polling timer setiap 3 detik
+    // Setup polling timer
     _pollingTimer = Timer.periodic(Duration(seconds: intervalSeconds), (timer) {
-      _fetchOptimizedData(controller);
+      _fetchDataWithFallback(controller);
     });
 
     controller.onCancel = () {
@@ -49,43 +49,122 @@ class SensorRemoteDataSource {
     return controller.stream;
   }
 
-  // Method optimasi untuk sequential data
-  void _fetchOptimizedData(
+  // Method dengan fallback: jika tidak ada data baru, ambil data terbaru
+  void _fetchDataWithFallback(
     StreamController<Map<String, dynamic>> controller,
   ) async {
     try {
-      _log('⏰ Optimized polling at ${DateTime.now().toIso8601String()}');
+      _log('⏰ Polling at ${DateTime.now().toIso8601String()}');
       
-      final data = await _fetchLatestSequentialData();
+      // Coba ambil data sequential terbaru
+      final sequentialData = await _fetchLatestSequentialData();
       
-      if (data != null && data['isNewData'] == true) {
-        _lastProcessedTimestamp = data['timestamp'] as DateTime;
-        _lastData = data;
+      if (sequentialData != null && sequentialData['isNewData'] == true) {
+        // Ada data baru
+        _lastProcessedTimestamp = sequentialData['timestamp'] as DateTime;
+        _lastData = sequentialData;
         
         if (!controller.isClosed) {
-          controller.add(data);
+          controller.add(sequentialData);
           _log('🆕 New sequential data added to stream');
         }
       } else {
-        _log('⏭️ No new sequential data available');
+        // Tidak ada data baru, ambil data terbaru dari database
+        _log('⏭️ No new data, fetching latest data from database');
+        final latestData = await _fetchLatestDataFromDatabase();
+        
+        if (latestData != null) {
+          _lastData = latestData;
+          
+          if (!controller.isClosed) {
+            controller.add(latestData);
+            _log('📋 Latest database data added to stream');
+          }
+        } else {
+          _log('💤 No data available in database');
+        }
       }
     } catch (e) {
-      _log('❌ Error in optimized polling: $e');
+      _log('❌ Error in polling: $e');
       if (!controller.isClosed) {
         controller.addError(e);
       }
     }
   }
 
+  // Method untuk mengambil data terbaru dari database (tanpa filter timestamp)
+  Future<Map<String, dynamic>?> _fetchLatestDataFromDatabase() async {
+    try {
+      _log('📋 Fetching latest data from database...');
+      
+      // Query untuk ambil data sensor terbaru
+      final sensorResponse = await http.get(
+        Uri.parse('${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.desc&limit=1'),
+        headers: _getHeaders(),
+      );
+
+      if (sensorResponse.statusCode == 200) {
+        final List<dynamic> sensorDataList = json.decode(sensorResponse.body);
+
+        if (sensorDataList.isNotEmpty) {
+          final sensor = SensorDataModel.fromJson(sensorDataList.first);
+          _log('📊 Latest sensor data: ${sensor.suhu}°C, ${sensor.kelembapan}% at ${sensor.timestamp}');
+
+          // Ambil device status terbaru
+          final deviceResponse = await http.get(
+            Uri.parse('${AppConstants.supabaseUrl}/rest/v1/device_status?order=timestamp.desc&limit=1'),
+            headers: _getHeaders(),
+          );
+
+          DeviceStatusModel device;
+          if (deviceResponse.statusCode == 200) {
+            final List<dynamic> deviceData = json.decode(deviceResponse.body);
+            device = deviceData.isNotEmpty 
+                ? DeviceStatusModel.fromJson(deviceData.first)
+                : _createDefaultDeviceStatus(sensor);
+          } else {
+            device = _createDefaultDeviceStatus(sensor);
+          }
+
+          final result = {
+            'sensor': sensor,
+            'device': device,
+            'timestamp': sensor.timestamp,
+            'isNewData': false, // Mark as not new data
+            'source': 'database_latest',
+          };
+
+          _log('✅ Latest database data fetched successfully');
+          return result;
+        } else {
+          _log('💤 No data available in database');
+          return null;
+        }
+      } else {
+        throw Exception('HTTP Error: ${sensorResponse.statusCode}');
+      }
+    } catch (e) {
+      _log('❌ Error fetching latest data: $e');
+      return null;
+    }
+  }
+
   // Method untuk mengambil data sequential terbaru
   Future<Map<String, dynamic>?> _fetchLatestSequentialData() async {
     try {
-      // Query untuk mendapatkan data terbaru setelah timestamp terakhir
-      String query = '${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.desc&limit=5';
+      _log('🕒 Last processed timestamp: $_lastProcessedTimestamp');
+      
+      String query;
       
       if (_lastProcessedTimestamp != null) {
+        // Untuk data sequential setelah timestamp terakhir
         final isoTime = _lastProcessedTimestamp!.toIso8601String();
         query = '${AppConstants.supabaseUrl}/rest/v1/sensor_data?timestamp=gt.$isoTime&order=timestamp.asc&limit=$SEQUENTIAL_BATCH_SIZE';
+        _log('🔍 Query: sequential data after $isoTime');
+      } else {
+        // Untuk data pertama kali - ambil data terbaru
+        query = '${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.desc&limit=1';
+        _log('🔍 Query: initial data (latest record)');
       }
 
       final sensorResponse = await http.get(
@@ -95,28 +174,35 @@ class SensorRemoteDataSource {
 
       if (sensorResponse.statusCode == 200) {
         final List<dynamic> sensorDataList = json.decode(sensorResponse.body);
+        _log('📊 Found ${sensorDataList.length} sensor records');
 
         if (sensorDataList.isNotEmpty) {
-          // Ambil data terbaru untuk processing
-          final latestSensorJson = _lastProcessedTimestamp != null 
+          for (var data in sensorDataList) {
+            _log('📝 Data: ${data['timestamp']} - Suhu: ${data['suhu']}°C, Kelembapan: ${data['kelembapan']}%');
+          }
+          
+          // Ambil data yang sesuai
+          final sensorJson = _lastProcessedTimestamp != null 
               ? sensorDataList.last // Untuk sequential, ambil yang terakhir
               : sensorDataList.first; // Untuk initial, ambil yang terbaru
               
-          final sensor = SensorDataModel.fromJson(latestSensorJson);
+          final sensor = SensorDataModel.fromJson(sensorJson);
 
-          _log('📊 Sequential processing - Found ${sensorDataList.length} new records');
-          
-          // Trigger automatic control untuk setiap data baru
-          for (final sensorJson in sensorDataList) {
-            final sequentialSensor = SensorDataModel.fromJson(sensorJson);
-            await _triggerAutomaticControlOnNewData(sequentialSensor);
+          // Untuk data pertama kali, trigger automatic control
+          if (_lastProcessedTimestamp == null && sensorDataList.isNotEmpty) {
+            _log('🎯 First time data - triggering automatic control');
+            await _triggerAutomaticControlOnNewData(sensor);
+          } else if (_lastProcessedTimestamp != null) {
+            // Untuk data sequential, trigger untuk setiap data baru
+            for (final sensorJson in sensorDataList) {
+              final sequentialSensor = SensorDataModel.fromJson(sensorJson);
+              await _triggerAutomaticControlOnNewData(sequentialSensor);
+            }
           }
 
           // Ambil device status terbaru
           final deviceResponse = await http.get(
-            Uri.parse(
-              '${AppConstants.supabaseUrl}/rest/v1/device_status?order=timestamp.desc&limit=1',
-            ),
+            Uri.parse('${AppConstants.supabaseUrl}/rest/v1/device_status?order=timestamp.desc&limit=1'),
             headers: _getHeaders(),
           );
 
@@ -136,6 +222,7 @@ class SensorRemoteDataSource {
             'timestamp': sensor.timestamp,
             'isNewData': true,
             'sequentialCount': sensorDataList.length,
+            'source': _lastProcessedTimestamp != null ? 'sequential' : 'initial',
           };
 
           _log('✅ Sequential data processed successfully');
@@ -148,8 +235,8 @@ class SensorRemoteDataSource {
         throw Exception('HTTP Error: ${sensorResponse.statusCode}');
       }
     } catch (e) {
-      _log('❌ Sequential data fetch error: $e');
-      rethrow;
+      _log('❌ Error in sequential data fetch: $e');
+      return null;
     }
   }
 
@@ -161,13 +248,9 @@ class SensorRemoteDataSource {
     );
     return DeviceStatusModel(
       id: 0,
-      statusLampu: AutomaticControl.convertLampuToBoolean(
-        control['lampu']!,
-      ),
+      statusLampu: AutomaticControl.convertLampuToBoolean(control['lampu']!),
       jumlahLampu: AutomaticControl.getJumlahLampu(control['lampu']!),
-      statusHumidifier: AutomaticControl.convertMistToBoolean(
-        control['mist']!,
-      ),
+      statusHumidifier: AutomaticControl.convertMistToBoolean(control['mist']!),
       targetKelembapan: 60.0,
       timestamp: sensor.timestamp,
     );
@@ -178,7 +261,6 @@ class SensorRemoteDataSource {
     try {
       _log('🔧 Triggering automatic control for new sensor data...');
 
-      // HITUNG kontrol otomatis berdasarkan data sensor baru
       final control = AutomaticControl.kontrolOtomatis(
         sensorData.suhu,
         sensorData.kelembapan,
@@ -186,21 +268,16 @@ class SensorRemoteDataSource {
       final lampuValue = control['lampu']!;
       final mistValue = control['mist']!;
 
-      // Konversi ke boolean untuk database
       final statusLampu = AutomaticControl.convertLampuToBoolean(lampuValue);
       final statusHumidifier = AutomaticControl.convertMistToBoolean(mistValue);
       final jumlahLampu = AutomaticControl.getJumlahLampu(lampuValue);
 
-      _log('🎛️ Automatic Control Calculated from new sensor data:');
-      _log(
-        '   - Suhu: ${sensorData.suhu}°C, Kelembapan: ${sensorData.kelembapan}%',
-      );
-      _log(
-        '   - Lampu: $lampuValue -> Status: $statusLampu, Jumlah: $jumlahLampu',
-      );
+      _log('🎛️ Automatic Control:');
+      _log('   - Suhu: ${sensorData.suhu}°C, Kelembapan: ${sensorData.kelembapan}%');
+      _log('   - Lampu: $lampuValue -> Status: $statusLampu, Jumlah: $jumlahLampu');
       _log('   - Mist: $mistValue -> Status: $statusHumidifier');
 
-      // KIRIM langsung ke device_status
+      // Kirim ke device_status
       final response = await http.post(
         Uri.parse('${AppConstants.supabaseUrl}/rest/v1/device_status'),
         headers: {
@@ -213,7 +290,7 @@ class SensorRemoteDataSource {
           'status_lampu': statusLampu,
           'jumlah_lampu': jumlahLampu,
           'status_humidifier': statusHumidifier,
-          'target_kelembapan': 60.0, // Default value
+          'target_kelembapan': 60.0,
           'timestamp': DateTime.now().toIso8601String(),
         }),
       );
@@ -222,32 +299,37 @@ class SensorRemoteDataSource {
         _log('✅ Automatic control data SENT to device_status table');
       } else {
         _log('❌ Failed to send automatic control: ${response.statusCode}');
-        _log('Error response: ${response.body}');
       }
     } catch (e) {
       _log('❌ Error triggering automatic control: $e');
     }
   }
 
-  // Method untuk mendapatkan headers HTTP
-  Map<String, String> _getHeaders() {
-    return {
-      'apikey': AppConstants.supabaseAnonKey,
-      'Authorization': 'Bearer ${AppConstants.supabaseAnonKey}',
-      'Content-Type': 'application/json',
-    };
-  }
-
   // Method untuk mengambil data sekali (untuk initial load)
   Future<Map<String, dynamic>> fetchInitialData() async {
     _log('🚀 Fetching initial data...');
-    final data = await _fetchLatestSequentialData();
-    _lastData = data;
-    _lastUpdateTime = DateTime.now();
-    return data!;
+    try {
+      // Reset last processed timestamp untuk memastikan ambil data terbaru
+      _lastProcessedTimestamp = null;
+      
+      final data = await _fetchLatestDataFromDatabase();
+      
+      if (data != null) {
+        _lastData = data;
+        _lastUpdateTime = DateTime.now();
+        _log('✅ Initial data fetched successfully');
+        return data;
+      } else {
+        _log('❌ No data available for initial load');
+        throw Exception('No data available in database');
+      }
+    } catch (e) {
+      _log('💥 Error fetching initial data: $e');
+      rethrow;
+    }
   }
 
-  // Method untuk mendapatkan data historis (IMPROVED untuk sequential)
+  // Method untuk mendapatkan data historis
   Future<List<Map<String, dynamic>>> fetchHistoricalData({
     int limit = 100,
   }) async {
@@ -255,21 +337,16 @@ class SensorRemoteDataSource {
       _log('📚 Fetching historical data (limit: $limit)...');
 
       final sensorResponse = await http.get(
-        Uri.parse(
-          '${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.asc&limit=$limit',
-        ),
+        Uri.parse('${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.asc&limit=$limit'),
         headers: _getHeaders(),
       );
 
       final deviceResponse = await http.get(
-        Uri.parse(
-          '${AppConstants.supabaseUrl}/rest/v1/device_status?order=timestamp.asc&limit=$limit',
-        ),
+        Uri.parse('${AppConstants.supabaseUrl}/rest/v1/device_status?order=timestamp.asc&limit=$limit'),
         headers: _getHeaders(),
       );
 
-      if (sensorResponse.statusCode == 200 &&
-          deviceResponse.statusCode == 200) {
+      if (sensorResponse.statusCode == 200 && deviceResponse.statusCode == 200) {
         final List<dynamic> sensorData = json.decode(sensorResponse.body);
         final List<dynamic> deviceData = json.decode(deviceResponse.body);
 
@@ -287,7 +364,6 @@ class SensorRemoteDataSource {
             final device = DeviceStatusModel.fromJson(deviceJson);
             final timeDiff = (sensor.timestamp.difference(device.timestamp)).abs();
 
-            // Hanya pertimbangkan device status dalam 10 detik
             if (timeDiff.inSeconds <= 10) {
               if (closestTimeDiff == null || timeDiff < closestTimeDiff) {
                 closestTimeDiff = timeDiff;
@@ -298,8 +374,7 @@ class SensorRemoteDataSource {
 
           historicalData.add({
             'sensor': sensor,
-            'device':
-                closestDevice ?? _createDefaultDeviceStatus(sensor),
+            'device': closestDevice ?? _createDefaultDeviceStatus(sensor),
             'timestamp': sensor.timestamp,
           });
         }
@@ -318,32 +393,19 @@ class SensorRemoteDataSource {
   // Method untuk mengirim status perangkat berdasarkan kontrol otomatis
   Future<bool> sendAutomaticControl(double suhu, double kelembapan) async {
     try {
-      // Hitung kontrol otomatis
       final control = AutomaticControl.kontrolOtomatis(suhu, kelembapan);
       final lampuValue = control['lampu']!;
       final mistValue = control['mist']!;
 
-      // Konversi ke boolean untuk database
       final statusLampu = AutomaticControl.convertLampuToBoolean(lampuValue);
       final statusHumidifier = AutomaticControl.convertMistToBoolean(mistValue);
       final jumlahLampu = AutomaticControl.getJumlahLampu(lampuValue);
 
-      // Default target kelembapan
       const double targetKelembapan = 60.0;
 
       _log('🎛️ Automatic Control Calculated:');
       _log('   - Suhu: $suhu°C, Kelembapan: $kelembapan%');
-      _log(
-        '   - Lampu: $lampuValue (${AutomaticControl.getStatusDescription(lampuValue, mistValue)['lampu']})',
-      );
-      _log(
-        '   - Mist: $mistValue (${AutomaticControl.getStatusDescription(lampuValue, mistValue)['mist']})',
-      );
-      _log('   - Status Lampu (DB): $statusLampu');
-      _log('   - Jumlah Lampu: $jumlahLampu');
-      _log('   - Status Humidifier (DB): $statusHumidifier');
 
-      // Kirim ke Supabase
       final response = await http.post(
         Uri.parse('${AppConstants.supabaseUrl}/rest/v1/device_status'),
         headers: {
@@ -367,7 +429,6 @@ class SensorRemoteDataSource {
         _log('✅ Automatic control sent successfully to Supabase');
       } else {
         _log('❌ Failed to send automatic control: ${response.statusCode}');
-        _log('Error response: ${response.body}');
       }
 
       return success;
@@ -393,15 +454,12 @@ class SensorRemoteDataSource {
       if (jumlahLampu != null) {
         commandData['jumlah_lampu'] = jumlahLampu;
       } else if (statusLampu != null && statusLampu) {
-        // Jika statusLampu true tapi jumlahLampu tidak diset, default ke 1
         commandData['jumlah_lampu'] = 1;
       } else {
         commandData['jumlah_lampu'] = 0;
       }
-      if (statusHumidifier != null)
-        commandData['status_humidifier'] = statusHumidifier;
-      if (targetKelembapan != null)
-        commandData['target_kelembapan'] = targetKelembapan;
+      if (statusHumidifier != null) commandData['status_humidifier'] = statusHumidifier;
+      if (targetKelembapan != null) commandData['target_kelembapan'] = targetKelembapan;
 
       _log('🔄 Sending manual control command: $commandData');
 
@@ -457,27 +515,31 @@ class SensorRemoteDataSource {
     return status;
   }
 
+  // Helper method untuk headers HTTP
+  Map<String, String> _getHeaders() {
+    return {
+      'apikey': AppConstants.supabaseAnonKey,
+      'Authorization': 'Bearer ${AppConstants.supabaseAnonKey}',
+      'Content-Type': 'application/json',
+    };
+  }
+
   // Helper method untuk logging
   void _log(String message) {
-    // Untuk sementara tetap pakai print, bisa diganti dengan logger nanti
-    print(message);
+    print('$runtimeType: $message');
   }
 
   void dispose() {
     _log('🛑 Disposing SensorRemoteDataSource...');
 
-    // Cancel polling timer
     _pollingTimer?.cancel();
     _pollingTimer = null;
 
-    // Unsubscribe dari realtime channels
     _sensorChannel?.unsubscribe();
     _deviceChannel?.unsubscribe();
 
-    // Remove semua channels
     _supabaseClient.removeAllChannels();
 
-    // Close controller
     if (_controller != null && !_controller!.isClosed) {
       _controller!.close();
     }
@@ -490,53 +552,5 @@ class SensorRemoteDataSource {
     _lastProcessedTimestamp = null;
 
     _log('✅ SensorRemoteDataSource disposed');
-  }
-
-  // Method untuk trigger scheduled control manually
-  Future<bool> triggerScheduledControl() async {
-    try {
-      final response = await http.post(
-        Uri.parse(
-          '${AppConstants.supabaseUrl}/rest/v1/rpc/manual_trigger_control',
-        ),
-        headers: {
-          'apikey': AppConstants.supabaseAnonKey,
-          'Authorization': 'Bearer ${AppConstants.supabaseAnonKey}',
-          'Content-Type': 'application/json',
-        },
-        body: json.encode({}),
-      );
-
-      return response.statusCode == 200;
-    } catch (e) {
-      _log('❌ Error triggering scheduled control: $e');
-      return false;
-    }
-  }
-
-  // Method untuk get system status
-  Future<Map<String, dynamic>> getControlSystemStatus() async {
-    try {
-      final response = await http.post(
-        Uri.parse(
-          '${AppConstants.supabaseUrl}/rest/v1/rpc/get_control_system_status',
-        ),
-        headers: {
-          'apikey': AppConstants.supabaseAnonKey,
-          'Authorization': 'Bearer ${AppConstants.supabaseAnonKey}',
-          'Content-Type': 'application/json',
-        },
-        body: json.encode({}),
-      );
-
-      if (response.statusCode == 200) {
-        return json.decode(response.body);
-      }
-
-      return {'system_status': 'UNKNOWN'};
-    } catch (e) {
-      _log('❌ Error getting system status: $e');
-      return {'system_status': 'ERROR', 'error': e.toString()};
-    }
   }
 }

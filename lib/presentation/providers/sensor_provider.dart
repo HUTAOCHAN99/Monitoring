@@ -18,7 +18,10 @@ class SensorProvider with ChangeNotifier {
   bool _isLoadingHistory = false;
   DateTime? _lastDataTimestamp;
   
-  // Konstanta optimasi
+  // Counter untuk tracking data source
+  int _newDataCount = 0;
+  int _databaseDataCount = 0;
+  
   static const int MAX_HISTORY_LENGTH = 500;
 
   SensorProvider(this._sensorRepository);
@@ -32,8 +35,9 @@ class SensorProvider with ChangeNotifier {
   bool get isConnected => _isConnected;
   List<Map<String, dynamic>> get dataHistory => _dataHistory;
   bool get isLoadingHistory => _isLoadingHistory;
+  int get newDataCount => _newDataCount;
+  int get databaseDataCount => _databaseDataCount;
 
-  // Method untuk mendapatkan data stream
   Stream<Map<String, dynamic>> getDataStream() {
     return _dataStream ??= _sensorRepository.getDataStream();
   }
@@ -43,47 +47,110 @@ class SensorProvider with ChangeNotifier {
       return;
     }
     
-    _loadHistoricalData(); // Load data historis dulu
-    _listenToData();
+    _log('🚀 Initializing SensorProvider...');
+    
+    _loadInitialDataWithRetry().then((_) {
+      _log('✅ Initial data loaded, starting history and stream...');
+      _loadHistoricalData();
+      _listenToData();
+    }).catchError((e) {
+      _log('❌ Failed to load initial data: $e');
+      _error = 'Gagal memuat data awal: $e';
+      _isLoading = false;
+      notifyListeners();
+    });
   }
 
-  // Method untuk load SEMUA data historis dari awal
+  Future<void> _loadInitialDataWithRetry() async {
+    int retryCount = 0;
+    const maxRetries = 3;
+    
+    _log('🔄 Starting initial data load with retry mechanism...');
+    
+    while (retryCount < maxRetries && _latestSensorData == null) {
+      try {
+        _log('🔄 Attempting to load initial data (attempt ${retryCount + 1}/$maxRetries)');
+        await _loadInitialData();
+        
+        if (_latestSensorData != null) {
+          _log('✅ Initial data loaded successfully on attempt ${retryCount + 1}');
+          break;
+        } else {
+          _log('⚠️  No data received on attempt ${retryCount + 1}');
+        }
+      } catch (e) {
+        _log('❌ Initial data load failed on attempt ${retryCount + 1}: $e');
+        retryCount++;
+        if (retryCount < maxRetries) {
+          _log('⏳ Waiting 2 seconds before retry...');
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      }
+    }
+    
+    if (_latestSensorData == null) {
+      _log('💥 Failed to load initial data after $maxRetries attempts');
+      _error = 'Tidak dapat memuat data awal. Pastikan perangkat sudah mengirim data ke database.';
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _loadInitialData() async {
+    try {
+      _log('🚀 Loading initial data from repository...');
+      final initialData = await _sensorRepository.fetchInitialData();
+      
+      if (initialData != null) {
+        final sensorData = initialData['sensor'] as SensorData;
+        final deviceStatus = initialData['device'] as DeviceStatus;
+        
+        _latestSensorData = sensorData;
+        _latestDeviceStatus = deviceStatus;
+        _lastDataTimestamp = sensorData.timestamp;
+        
+        // Tambahkan ke history
+        _dataHistory.add(initialData);
+        
+        _isLoading = false;
+        _isConnected = true;
+        _error = null;
+        
+        _log('✅ Initial data set: ${sensorData.suhu}°C, ${sensorData.kelembapan}% at ${sensorData.timestamp}');
+        notifyListeners();
+      } else {
+        _log('⚠️  Initial data is null');
+        throw Exception('No initial data received');
+      }
+    } catch (e) {
+      _log('❌ Error loading initial data: $e');
+      rethrow;
+    }
+  }
+
   Future<void> _loadHistoricalData() async {
     try {
       _isLoadingHistory = true;
       notifyListeners();
 
-      // Ambil SEMUA data historis (limit besar untuk cover semua data)
+      _log('📚 Loading historical data...');
+      
       final historicalData = await _sensorRepository.fetchHistoricalData(limit: 500);
       
-      // Simpan semua data tanpa filter waktu
       _dataHistory = historicalData;
       
-      // Set last timestamp dari data historis
       if (_dataHistory.isNotEmpty) {
         final latestSensor = _dataHistory.last['sensor'] as SensorData;
         _lastDataTimestamp = latestSensor.timestamp;
-      }
-      
-      // Debug info
-      if (_dataHistory.isNotEmpty) {
-        final oldest = (_dataHistory.first['sensor'] as SensorData).timestamp;
-        final latest = (_dataHistory.last['sensor'] as SensorData).timestamp;
-        final duration = latest.difference(oldest);
-        if (kDebugMode) {
-          print('📊 Loaded ${_dataHistory.length} data points (ALL DATA FROM BEGINNING)');
-          print('📊 Data range: ${duration.inHours} hours ${duration.inMinutes.remainder(60)} minutes');
-          print('📊 From: $oldest to $latest');
-          print('📊 Last timestamp set to: $_lastDataTimestamp');
-        }
+        _log('📊 Historical data loaded: ${_dataHistory.length} items, latest: $_lastDataTimestamp');
+      } else {
+        _log('💤 No historical data found');
       }
       
       _isLoadingHistory = false;
       notifyListeners();
     } catch (e) {
-      if (kDebugMode) {
-        print('❌ Error loading historical data: $e');
-      }
+      _log('❌ Error loading historical data: $e');
       _isLoadingHistory = false;
       notifyListeners();
     }
@@ -97,10 +164,9 @@ class SensorProvider with ChangeNotifier {
     try {
       _dataStream = _sensorRepository.getDataStream();
       _setupSubscription();
+      _log('🎯 Real-time stream started');
     } catch (e) {
-      if (kDebugMode) {
-        print('Realtime failed, falling back to polling: $e');
-      }
+      _log('❌ Realtime failed, falling back to polling: $e');
       _usePollingFallback();
     }
   }
@@ -109,10 +175,12 @@ class SensorProvider with ChangeNotifier {
     try {
       _dataStream = _sensorRepository.getDataPolling(intervalSeconds: 5);
       _setupSubscription();
+      _log('🔄 Fallback to polling mode (5 seconds)');
     } catch (e) {
       _error = 'Gagal memulai monitoring: $e';
       _isLoading = false;
       notifyListeners();
+      _log('💥 Polling fallback also failed: $e');
     }
   }
 
@@ -121,50 +189,48 @@ class SensorProvider with ChangeNotifier {
       (data) {
         final sensorData = data['sensor'] as SensorData;
         final deviceStatus = data['device'] as DeviceStatus;
-        final sequentialCount = data['sequentialCount'] as int? ?? 1;
+        final source = data['source'] as String? ?? 'unknown';
         
-        // Cek apakah ini data sequential baru
-        final isSequentialNew = _lastDataTimestamp == null || 
-                               sensorData.timestamp.isAfter(_lastDataTimestamp!);
-        
-        if (isSequentialNew) {
-          _latestSensorData = sensorData;
-          _latestDeviceStatus = deviceStatus;
-          _lastDataTimestamp = sensorData.timestamp;
-          
-          // Tambahkan ke history dengan penanganan sequential
-          _addSequentialToHistory(data);
-          
-          _isLoading = false;
-          _isConnected = true;
-          _error = null;
-          
-          if (kDebugMode) {
-            print('🔄 Sequential data updated: ${sensorData.timestamp}');
-            print('📦 Sequential count: $sequentialCount records');
-          }
-          
-          notifyListeners();
-        } else {
-          if (kDebugMode) {
-            print('⏭️ Skipping duplicate/older data: ${sensorData.timestamp}');
-          }
+        // Track data source
+        if (source == 'sequential' || source == 'initial') {
+          _newDataCount++;
+          _log('🆕 New data from sensor: ${sensorData.suhu}°C, ${sensorData.kelembapan}%');
+        } else if (source == 'database_latest') {
+          _databaseDataCount++;
+          _log('📋 Data from database: ${sensorData.suhu}°C, ${sensorData.kelembapan}%');
         }
+
+        // SELALU update data, regardless of timestamp
+        // Ini memastikan data terbaru dari database selalu ditampilkan
+        _latestSensorData = sensorData;
+        _latestDeviceStatus = deviceStatus;
+        _lastDataTimestamp = sensorData.timestamp;
+        
+        // Tambahkan ke history
+        _addToHistory(data);
+        
+        _isLoading = false;
+        _isConnected = true;
+        _error = null;
+        
+        _log('✅ Data updated - Source: $source, Total new: $_newDataCount, Total db: $_databaseDataCount');
+        
+        notifyListeners();
       },
       onError: (error) {
         _error = 'Koneksi gagal: $error';
         _isLoading = false;
         _isConnected = false;
+        _log('❌ Stream error: $error');
         notifyListeners();
       },
       onDone: () {
         _isConnected = false;
         _subscription = null;
-        if (kDebugMode) {
-          print('📭 Data stream closed, attempting to restart...');
-        }
+        _log('📭 Data stream closed, attempting to restart...');
         Future.delayed(const Duration(seconds: 3), () {
           if (_subscription == null) {
+            _log('🔄 Restarting data stream...');
             _listenToData();
           }
         });
@@ -177,13 +243,14 @@ class SensorProvider with ChangeNotifier {
       if (_isLoading && _latestSensorData == null) {
         _error = 'Tidak ada data. Pastikan perangkat mengirim data.';
         _isLoading = false;
+        _log('⏰ Loading timeout - no data received');
         notifyListeners();
       }
     });
   }
 
-  // Method improved untuk sequential history
-  void _addSequentialToHistory(Map<String, dynamic> newData) {
+  // Method untuk menambah data ke history (selalu update)
+  void _addToHistory(Map<String, dynamic> newData) {
     final sensor = newData['sensor'] as SensorData;
     
     // Cek apakah data sudah ada berdasarkan timestamp
@@ -203,75 +270,59 @@ class SensorProvider with ChangeNotifier {
         return sensorA.timestamp.compareTo(sensorB.timestamp);
       });
       
-      // Batasi history untuk menghindari memory overflow
+      // Batasi history
       _cleanupOldData();
       
-      if (kDebugMode) {
-        print('📈 ADDED sequential data - Total: ${_dataHistory.length}');
-      }
+      _log('📈 ADDED data to history - Total: ${_dataHistory.length}');
     } else {
       // Update data existing
       _dataHistory[existingIndex] = newData;
-      if (kDebugMode) {
-        print('🔄 UPDATED existing sequential data');
-      }
+      _log('🔄 UPDATED existing data at index $existingIndex');
     }
   }
 
-  // Method untuk cleanup data lama
   void _cleanupOldData() {
     if (_dataHistory.length > MAX_HISTORY_LENGTH) {
       _dataHistory = _dataHistory.sublist(_dataHistory.length - (MAX_HISTORY_LENGTH ~/ 2));
-      if (kDebugMode) {
-        print('🧹 Cleaned up old history data, now: ${_dataHistory.length} records');
-      }
+      _log('🧹 Cleaned up old history data, now: ${_dataHistory.length} records');
     }
   }
 
-  // Method untuk refresh data historis (load ulang semua data)
   Future<void> refreshHistoricalData() async {
-    if (kDebugMode) {
-      print('🔄 Manual refresh: Loading all historical data...');
-    }
+    _log('🔄 Manual refresh: Loading all historical data...');
     await _loadHistoricalData();
   }
 
-  // Method untuk memaksa update data terbaru
   Future<void> forceRefresh() async {
     try {
       _isLoading = true;
       notifyListeners();
       
-      // Fetch data terbaru langsung
+      _log('🔁 Force refreshing data...');
+      
       final newData = await _sensorRepository.fetchInitialData();
       
       _latestSensorData = newData['sensor'] as SensorData;
       _latestDeviceStatus = newData['device'] as DeviceStatus;
       _lastDataTimestamp = _latestSensorData!.timestamp;
       
-      // Update history
-      _addSequentialToHistory(newData);
+      _addToHistory(newData);
       
       _isLoading = false;
       _isConnected = true;
       _error = null;
       notifyListeners();
       
-      if (kDebugMode) {
-        print('✅ Force refresh completed');
-      }
+      _log('✅ Force refresh completed');
       
     } catch (e) {
       _error = 'Refresh failed: $e';
       _isLoading = false;
       notifyListeners();
-      if (kDebugMode) {
-        print('❌ Force refresh error: $e');
-      }
+      _log('❌ Force refresh error: $e');
     }
   }
 
-  // Method untuk mendapatkan statistik data
   Map<String, dynamic> getDataStatistics() {
     if (_dataHistory.isEmpty) {
       return {
@@ -280,6 +331,8 @@ class SensorProvider with ChangeNotifier {
         'avgTemperature': 0,
         'avgHumidity': 0,
         'lastTimestamp': null,
+        'newDataCount': _newDataCount,
+        'databaseDataCount': _databaseDataCount,
       };
     }
 
@@ -287,7 +340,6 @@ class SensorProvider with ChangeNotifier {
     final latest = (_dataHistory.last['sensor'] as SensorData).timestamp;
     final duration = latest.difference(oldest);
 
-    // Hitung rata-rata suhu dan kelembapan
     double totalTemp = 0;
     double totalHumidity = 0;
     
@@ -308,10 +360,11 @@ class SensorProvider with ChangeNotifier {
       'oldestData': oldest,
       'latestData': latest,
       'lastTimestamp': _lastDataTimestamp,
+      'newDataCount': _newDataCount,
+      'databaseDataCount': _databaseDataCount,
     };
   }
 
-  // Method untuk mendapatkan data dalam rentang waktu tertentu
   List<Map<String, dynamic>> getDataInTimeRange(DateTime start, DateTime end) {
     return _dataHistory.where((data) {
       final sensor = data['sensor'] as SensorData;
@@ -319,17 +372,16 @@ class SensorProvider with ChangeNotifier {
     }).toList();
   }
 
-  // Method untuk clear data history (opsional, untuk debugging)
   void clearHistory() {
     _dataHistory.clear();
     _lastDataTimestamp = null;
-    if (kDebugMode) {
-      print('🗑️ Cleared all history data');
-    }
+    _log('🗑️ Cleared all history data');
     notifyListeners();
   }
 
   void retry() {
+    _log('🔄 Retrying connection...');
+    
     _subscription?.cancel();
     _subscription = null;
     
@@ -339,6 +391,8 @@ class SensorProvider with ChangeNotifier {
     _latestSensorData = null;
     _latestDeviceStatus = null;
     _lastDataTimestamp = null;
+    _newDataCount = 0;
+    _databaseDataCount = 0;
     notifyListeners();
     
     _sensorRepository.dispose();
@@ -353,8 +407,15 @@ class SensorProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  void _log(String message) {
+    if (kDebugMode) {
+      print('SensorProvider: $message');
+    }
+  }
+
   @override
   void dispose() {
+    _log('🛑 Disposing SensorProvider...');
     _subscription?.cancel();
     _sensorRepository.dispose();
     super.dispose();
