@@ -17,24 +17,29 @@ class SensorRemoteDataSource {
   Timer? _pollingTimer;
   DateTime? _lastUpdateTime;
   Map<String, dynamic>? _lastData;
+  DateTime? _lastProcessedTimestamp;
+
+  // Konstanta optimasi
+  static const int MAX_HISTORY_LENGTH = 500;
+  static const int SEQUENTIAL_BATCH_SIZE = 10;
+  static const int POLLING_INTERVAL = 3; // seconds
 
   SensorRemoteDataSource() : _supabaseClient = Supabase.instance.client;
 
-  // Method utama untuk mengambil data terbaru dengan polling 3 detik
+  // Method utama untuk real-time data dengan optimasi sequential
   Stream<Map<String, dynamic>> getRealtimeData({int intervalSeconds = 3}) {
-    _log('🔄 Starting realtime data polling every $intervalSeconds seconds');
+    _log('🔄 Starting optimized realtime data polling every $intervalSeconds seconds');
 
     final controller = StreamController<Map<String, dynamic>>.broadcast();
 
     // Fetch data pertama kali
-    _fetchLatestDataWithPolling(controller);
+    _fetchOptimizedData(controller);
 
     // Setup polling timer setiap 3 detik
     _pollingTimer = Timer.periodic(Duration(seconds: intervalSeconds), (timer) {
-      _fetchLatestDataWithPolling(controller);
+      _fetchOptimizedData(controller);
     });
 
-    // Cleanup ketika stream di-cancel
     controller.onCancel = () {
       _log('🛑 Stopping realtime data polling');
       _pollingTimer?.cancel();
@@ -44,58 +49,70 @@ class SensorRemoteDataSource {
     return controller.stream;
   }
 
-  // Method untuk fetch data dengan polling
-  void _fetchLatestDataWithPolling(
+  // Method optimasi untuk sequential data
+  void _fetchOptimizedData(
     StreamController<Map<String, dynamic>> controller,
   ) async {
     try {
-      _log('⏰ Polling data at ${DateTime.now().toIso8601String()}');
-
-      final data = await _fetchLatestDataFromSupabase();
-
-      // Cek apakah data benar-benar baru
-      if (_isNewData(data)) {
-        _log('🆕 New data detected, updating stream...');
+      _log('⏰ Optimized polling at ${DateTime.now().toIso8601String()}');
+      
+      final data = await _fetchLatestSequentialData();
+      
+      if (data != null && data['isNewData'] == true) {
+        _lastProcessedTimestamp = data['timestamp'] as DateTime;
         _lastData = data;
-        _lastUpdateTime = DateTime.now();
-
+        
         if (!controller.isClosed) {
           controller.add(data);
+          _log('🆕 New sequential data added to stream');
         }
       } else {
-        _log('⏭️ No new data, skipping update');
+        _log('⏭️ No new sequential data available');
       }
     } catch (e) {
-      _log('❌ Error in polling: $e');
+      _log('❌ Error in optimized polling: $e');
       if (!controller.isClosed) {
         controller.addError(e);
       }
     }
   }
 
-  // Method untuk mengambil data terbaru dari Supabase
-  Future<Map<String, dynamic>> _fetchLatestDataFromSupabase() async {
+  // Method untuk mengambil data sequential terbaru
+  Future<Map<String, dynamic>?> _fetchLatestSequentialData() async {
     try {
-      _log('📡 Fetching latest data from Supabase...');
+      // Query untuk mendapatkan data terbaru setelah timestamp terakhir
+      String query = '${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.desc&limit=5';
+      
+      if (_lastProcessedTimestamp != null) {
+        final isoTime = _lastProcessedTimestamp!.toIso8601String();
+        query = '${AppConstants.supabaseUrl}/rest/v1/sensor_data?timestamp=gt.$isoTime&order=timestamp.asc&limit=$SEQUENTIAL_BATCH_SIZE';
+      }
 
-      // Ambil data sensor terbaru
       final sensorResponse = await http.get(
-        Uri.parse(
-          '${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.desc&limit=1',
-        ),
+        Uri.parse(query),
         headers: _getHeaders(),
       );
 
       if (sensorResponse.statusCode == 200) {
-        final List<dynamic> sensorData = json.decode(sensorResponse.body);
+        final List<dynamic> sensorDataList = json.decode(sensorResponse.body);
 
-        if (sensorData.isNotEmpty) {
-          final sensor = SensorDataModel.fromJson(sensorData.first);
+        if (sensorDataList.isNotEmpty) {
+          // Ambil data terbaru untuk processing
+          final latestSensorJson = _lastProcessedTimestamp != null 
+              ? sensorDataList.last // Untuk sequential, ambil yang terakhir
+              : sensorDataList.first; // Untuk initial, ambil yang terbaru
+              
+          final sensor = SensorDataModel.fromJson(latestSensorJson);
 
-          // ⚡ TRIGGER AUTOMATIC CONTROL SETIAP ADA DATA SENSOR BARU - PASTIKAN INI DIPANGGIL
-          await _triggerAutomaticControlOnNewData(sensor);
+          _log('📊 Sequential processing - Found ${sensorDataList.length} new records');
+          
+          // Trigger automatic control untuk setiap data baru
+          for (final sensorJson in sensorDataList) {
+            final sequentialSensor = SensorDataModel.fromJson(sensorJson);
+            await _triggerAutomaticControlOnNewData(sequentialSensor);
+          }
 
-          // Ambil status device terbaru SETELAH trigger automatic control
+          // Ambil device status terbaru
           final deviceResponse = await http.get(
             Uri.parse(
               '${AppConstants.supabaseUrl}/rest/v1/device_status?order=timestamp.desc&limit=1',
@@ -103,91 +120,60 @@ class SensorRemoteDataSource {
             headers: _getHeaders(),
           );
 
-          _log('📊 Sensor Status: ${sensorResponse.statusCode}');
-          _log('📊 Device Status: ${deviceResponse.statusCode}');
-
           DeviceStatusModel device;
           if (deviceResponse.statusCode == 200) {
             final List<dynamic> deviceData = json.decode(deviceResponse.body);
-
-            if (deviceData.isNotEmpty) {
-              device = DeviceStatusModel.fromJson(deviceData.first);
-              _log('📈 Device items found: ${deviceData.length}');
-            } else {
-              // Buat device status default jika tidak ada data
-              final control = AutomaticControl.kontrolOtomatis(
-                sensor.suhu,
-                sensor.kelembapan,
-              );
-              device = DeviceStatusModel(
-                id: 0,
-                statusLampu: AutomaticControl.convertLampuToBoolean(
-                  control['lampu']!,
-                ),
-                jumlahLampu: AutomaticControl.getJumlahLampu(control['lampu']!),
-                statusHumidifier: AutomaticControl.convertMistToBoolean(
-                  control['mist']!,
-                ),
-                targetKelembapan: 60.0,
-                timestamp: sensor.timestamp,
-              );
-              _log('⚠️ No device data, using default control');
-            }
+            device = deviceData.isNotEmpty 
+                ? DeviceStatusModel.fromJson(deviceData.first)
+                : _createDefaultDeviceStatus(sensor);
           } else {
-            // Fallback jika device response gagal
-            final control = AutomaticControl.kontrolOtomatis(
-              sensor.suhu,
-              sensor.kelembapan,
-            );
-            device = DeviceStatusModel(
-              id: 0,
-              statusLampu: AutomaticControl.convertLampuToBoolean(
-                control['lampu']!,
-              ),
-              jumlahLampu: AutomaticControl.getJumlahLampu(control['lampu']!),
-              statusHumidifier: AutomaticControl.convertMistToBoolean(
-                control['mist']!,
-              ),
-              targetKelembapan: 60.0,
-              timestamp: sensor.timestamp,
-            );
-            _log('⚠️ Device response failed, using default control');
+            device = _createDefaultDeviceStatus(sensor);
           }
 
           final result = {
             'sensor': sensor,
             'device': device,
-            'timestamp': DateTime.now(),
+            'timestamp': sensor.timestamp,
             'isNewData': true,
+            'sequentialCount': sensorDataList.length,
           };
 
-          _log('✅ Data fetched successfully:');
-          _log(
-            '   - Sensor: ${sensor.suhu}°C, ${sensor.kelembapan}% at ${sensor.timestamp}',
-          );
-          _log(
-            '   - Device: Lampu=${device.statusLampu}, Jumlah Lampu=${device.jumlahLampu}, Humidifier=${device.statusHumidifier} at ${device.timestamp}',
-          );
-
+          _log('✅ Sequential data processed successfully');
           return result;
         } else {
-          _log('❌ No sensor data available');
-          throw Exception('No sensor data available');
+          _log('⏭️ No new sequential data available');
+          return null;
         }
       } else {
-        final errorMsg = 'HTTP Error: Sensor=${sensorResponse.statusCode}';
-        _log('❌ $errorMsg');
-        _log('Sensor Error: ${sensorResponse.body}');
-
-        throw Exception(errorMsg);
+        throw Exception('HTTP Error: ${sensorResponse.statusCode}');
       }
     } catch (e) {
-      _log('❌ Fetch error: $e');
-      throw Exception('Fetch error: $e');
+      _log('❌ Sequential data fetch error: $e');
+      rethrow;
     }
   }
 
-  // Method untuk trigger kontrol otomatis ketika ada data sensor baru - VERSION FIXED
+  // Helper method untuk membuat device status default
+  DeviceStatusModel _createDefaultDeviceStatus(SensorData sensor) {
+    final control = AutomaticControl.kontrolOtomatis(
+      sensor.suhu,
+      sensor.kelembapan,
+    );
+    return DeviceStatusModel(
+      id: 0,
+      statusLampu: AutomaticControl.convertLampuToBoolean(
+        control['lampu']!,
+      ),
+      jumlahLampu: AutomaticControl.getJumlahLampu(control['lampu']!),
+      statusHumidifier: AutomaticControl.convertMistToBoolean(
+        control['mist']!,
+      ),
+      targetKelembapan: 60.0,
+      timestamp: sensor.timestamp,
+    );
+  }
+
+  // Method untuk trigger kontrol otomatis ketika ada data sensor baru
   Future<void> _triggerAutomaticControlOnNewData(SensorData sensorData) async {
     try {
       _log('🔧 Triggering automatic control for new sensor data...');
@@ -243,40 +229,6 @@ class SensorRemoteDataSource {
     }
   }
 
-  // Method untuk mengecek apakah data benar-benar baru
-  bool _isNewData(Map<String, dynamic> newData) {
-    if (_lastData == null) {
-      return true; // Data pertama selalu dianggap baru
-    }
-
-    final SensorData newSensor = newData['sensor'];
-    final DeviceStatus newDevice = newData['device'];
-    final SensorData lastSensor = _lastData!['sensor'];
-    final DeviceStatus lastDevice = _lastData!['device'];
-
-    // Bandingkan timestamp untuk melihat apakah data berubah
-    final bool sensorChanged = newSensor.timestamp != lastSensor.timestamp;
-    final bool deviceChanged = newDevice.timestamp != lastDevice.timestamp;
-    final bool valuesChanged =
-        newSensor.suhu != lastSensor.suhu ||
-        newSensor.kelembapan != lastSensor.kelembapan ||
-        newDevice.statusLampu != lastDevice.statusLampu ||
-        newDevice.jumlahLampu != lastDevice.jumlahLampu ||
-        newDevice.statusHumidifier != lastDevice.statusHumidifier ||
-        newDevice.targetKelembapan != lastDevice.targetKelembapan;
-
-    final bool isNew = sensorChanged || deviceChanged || valuesChanged;
-
-    if (isNew) {
-      _log('🆕 Data changed detected:');
-      if (sensorChanged) _log('   - Sensor timestamp changed');
-      if (deviceChanged) _log('   - Device timestamp changed');
-      if (valuesChanged) _log('   - Values changed');
-    }
-
-    return isNew;
-  }
-
   // Method untuk mendapatkan headers HTTP
   Map<String, String> _getHeaders() {
     return {
@@ -289,29 +241,29 @@ class SensorRemoteDataSource {
   // Method untuk mengambil data sekali (untuk initial load)
   Future<Map<String, dynamic>> fetchInitialData() async {
     _log('🚀 Fetching initial data...');
-    final data = await _fetchLatestDataFromSupabase();
+    final data = await _fetchLatestSequentialData();
     _lastData = data;
     _lastUpdateTime = DateTime.now();
-    return data;
+    return data!;
   }
 
-  // Method untuk mendapatkan data historis (opsional)
+  // Method untuk mendapatkan data historis (IMPROVED untuk sequential)
   Future<List<Map<String, dynamic>>> fetchHistoricalData({
-    int limit = 20,
+    int limit = 100,
   }) async {
     try {
       _log('📚 Fetching historical data (limit: $limit)...');
 
       final sensorResponse = await http.get(
         Uri.parse(
-          '${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.desc&limit=$limit',
+          '${AppConstants.supabaseUrl}/rest/v1/sensor_data?order=timestamp.asc&limit=$limit',
         ),
         headers: _getHeaders(),
       );
 
       final deviceResponse = await http.get(
         Uri.parse(
-          '${AppConstants.supabaseUrl}/rest/v1/device_status?order=timestamp.desc&limit=$limit',
+          '${AppConstants.supabaseUrl}/rest/v1/device_status?order=timestamp.asc&limit=$limit',
         ),
         headers: _getHeaders(),
       );
@@ -327,34 +279,27 @@ class SensorRemoteDataSource {
         for (int i = 0; i < sensorData.length; i++) {
           final sensor = SensorDataModel.fromJson(sensorData[i]);
 
-          // Cari device status dengan timestamp terdekat
+          // Cari device status dengan timestamp terdekat (dalam 10 detik)
           DeviceStatusModel? closestDevice;
           Duration? closestTimeDiff;
 
           for (final deviceJson in deviceData) {
             final device = DeviceStatusModel.fromJson(deviceJson);
-            final timeDiff = (sensor.timestamp.difference(
-              device.timestamp,
-            )).abs();
+            final timeDiff = (sensor.timestamp.difference(device.timestamp)).abs();
 
-            if (closestTimeDiff == null || timeDiff < closestTimeDiff) {
-              closestTimeDiff = timeDiff;
-              closestDevice = device;
+            // Hanya pertimbangkan device status dalam 10 detik
+            if (timeDiff.inSeconds <= 10) {
+              if (closestTimeDiff == null || timeDiff < closestTimeDiff) {
+                closestTimeDiff = timeDiff;
+                closestDevice = device;
+              }
             }
           }
 
           historicalData.add({
             'sensor': sensor,
             'device':
-                closestDevice ??
-                DeviceStatusModel(
-                  id: 0,
-                  statusLampu: false,
-                  jumlahLampu: 0,
-                  statusHumidifier: false,
-                  targetKelembapan: 60.0,
-                  timestamp: sensor.timestamp,
-                ),
+                closestDevice ?? _createDefaultDeviceStatus(sensor),
             'timestamp': sensor.timestamp,
           });
         }
@@ -502,8 +447,10 @@ class SensorRemoteDataSource {
     final status = {
       'polling_active': _pollingTimer != null && _pollingTimer!.isActive,
       'last_update_time': _lastUpdateTime?.toIso8601String(),
-      'polling_interval': '3 seconds',
+      'last_processed_timestamp': _lastProcessedTimestamp?.toIso8601String(),
+      'polling_interval': '$POLLING_INTERVAL seconds',
       'data_count': _lastData != null ? 1 : 0,
+      'sequential_batch_size': SEQUENTIAL_BATCH_SIZE,
     };
 
     _log('📡 Polling Status: $status');
@@ -540,6 +487,7 @@ class SensorRemoteDataSource {
     _deviceChannel = null;
     _lastData = null;
     _lastUpdateTime = null;
+    _lastProcessedTimestamp = null;
 
     _log('✅ SensorRemoteDataSource disposed');
   }

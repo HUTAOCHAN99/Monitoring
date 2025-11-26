@@ -16,6 +16,10 @@ class SensorProvider with ChangeNotifier {
   List<Map<String, dynamic>> _dataHistory = [];
   StreamSubscription<Map<String, dynamic>>? _subscription;
   bool _isLoadingHistory = false;
+  DateTime? _lastDataTimestamp;
+  
+  // Konstanta optimasi
+  static const int MAX_HISTORY_LENGTH = 500;
 
   SensorProvider(this._sensorRepository);
 
@@ -29,6 +33,11 @@ class SensorProvider with ChangeNotifier {
   List<Map<String, dynamic>> get dataHistory => _dataHistory;
   bool get isLoadingHistory => _isLoadingHistory;
 
+  // Method untuk mendapatkan data stream
+  Stream<Map<String, dynamic>> getDataStream() {
+    return _dataStream ??= _sensorRepository.getDataStream();
+  }
+
   void initialize() {
     if (_subscription != null) {
       return;
@@ -38,7 +47,7 @@ class SensorProvider with ChangeNotifier {
     _listenToData();
   }
 
-  // Method baru: Load SEMUA data historis dari awal
+  // Method untuk load SEMUA data historis dari awal
   Future<void> _loadHistoricalData() async {
     try {
       _isLoadingHistory = true;
@@ -50,28 +59,31 @@ class SensorProvider with ChangeNotifier {
       // Simpan semua data tanpa filter waktu
       _dataHistory = historicalData;
       
-      // Urutkan data berdasarkan timestamp (terlama ke terbaru)
-      _dataHistory.sort((a, b) {
-        final sensorA = a['sensor'] as SensorData;
-        final sensorB = b['sensor'] as SensorData;
-        return sensorA.timestamp.compareTo(sensorB.timestamp);
-      });
-
-      print('📊 Loaded ${_dataHistory.length} data points (ALL DATA FROM BEGINNING)');
+      // Set last timestamp dari data historis
+      if (_dataHistory.isNotEmpty) {
+        final latestSensor = _dataHistory.last['sensor'] as SensorData;
+        _lastDataTimestamp = latestSensor.timestamp;
+      }
       
       // Debug info
       if (_dataHistory.isNotEmpty) {
         final oldest = (_dataHistory.first['sensor'] as SensorData).timestamp;
         final latest = (_dataHistory.last['sensor'] as SensorData).timestamp;
         final duration = latest.difference(oldest);
-        print('📊 Data range: ${duration.inHours} hours ${duration.inMinutes.remainder(60)} minutes');
-        print('📊 From: $oldest to $latest');
+        if (kDebugMode) {
+          print('📊 Loaded ${_dataHistory.length} data points (ALL DATA FROM BEGINNING)');
+          print('📊 Data range: ${duration.inHours} hours ${duration.inMinutes.remainder(60)} minutes');
+          print('📊 From: $oldest to $latest');
+          print('📊 Last timestamp set to: $_lastDataTimestamp');
+        }
       }
       
       _isLoadingHistory = false;
       notifyListeners();
     } catch (e) {
-      print('❌ Error loading historical data: $e');
+      if (kDebugMode) {
+        print('❌ Error loading historical data: $e');
+      }
       _isLoadingHistory = false;
       notifyListeners();
     }
@@ -86,7 +98,9 @@ class SensorProvider with ChangeNotifier {
       _dataStream = _sensorRepository.getDataStream();
       _setupSubscription();
     } catch (e) {
-      print('Realtime failed, falling back to polling: $e');
+      if (kDebugMode) {
+        print('Realtime failed, falling back to polling: $e');
+      }
       _usePollingFallback();
     }
   }
@@ -105,16 +119,37 @@ class SensorProvider with ChangeNotifier {
   void _setupSubscription() {
     _subscription = _dataStream?.listen(
       (data) {
-        _latestSensorData = data['sensor'] as SensorData;
-        _latestDeviceStatus = data['device'] as DeviceStatus;
+        final sensorData = data['sensor'] as SensorData;
+        final deviceStatus = data['device'] as DeviceStatus;
+        final sequentialCount = data['sequentialCount'] as int? ?? 1;
         
-        // Tambahkan data baru ke history
-        _addToHistory(data);
+        // Cek apakah ini data sequential baru
+        final isSequentialNew = _lastDataTimestamp == null || 
+                               sensorData.timestamp.isAfter(_lastDataTimestamp!);
         
-        _isLoading = false;
-        _isConnected = true;
-        _error = null;
-        notifyListeners();
+        if (isSequentialNew) {
+          _latestSensorData = sensorData;
+          _latestDeviceStatus = deviceStatus;
+          _lastDataTimestamp = sensorData.timestamp;
+          
+          // Tambahkan ke history dengan penanganan sequential
+          _addSequentialToHistory(data);
+          
+          _isLoading = false;
+          _isConnected = true;
+          _error = null;
+          
+          if (kDebugMode) {
+            print('🔄 Sequential data updated: ${sensorData.timestamp}');
+            print('📦 Sequential count: $sequentialCount records');
+          }
+          
+          notifyListeners();
+        } else {
+          if (kDebugMode) {
+            print('⏭️ Skipping duplicate/older data: ${sensorData.timestamp}');
+          }
+        }
       },
       onError: (error) {
         _error = 'Koneksi gagal: $error';
@@ -125,6 +160,14 @@ class SensorProvider with ChangeNotifier {
       onDone: () {
         _isConnected = false;
         _subscription = null;
+        if (kDebugMode) {
+          print('📭 Data stream closed, attempting to restart...');
+        }
+        Future.delayed(const Duration(seconds: 3), () {
+          if (_subscription == null) {
+            _listenToData();
+          }
+        });
       },
       cancelOnError: false,
     );
@@ -139,47 +182,93 @@ class SensorProvider with ChangeNotifier {
     });
   }
 
-  // Method baru: Tambah data ke history (semua data disimpan)
-  void _addToHistory(Map<String, dynamic> newData) {
+  // Method improved untuk sequential history
+  void _addSequentialToHistory(Map<String, dynamic> newData) {
     final sensor = newData['sensor'] as SensorData;
     
-    // Cek apakah data sudah ada (berdasarkan timestamp)
+    // Cek apakah data sudah ada berdasarkan timestamp
     final existingIndex = _dataHistory.indexWhere((existing) {
       final existingSensor = existing['sensor'] as SensorData;
       return existingSensor.timestamp == sensor.timestamp;
     });
     
     if (existingIndex == -1) {
-      // Data baru, tambahkan
+      // Data baru, tambahkan ke history
       _dataHistory.add(newData);
       
-      // Urutkan berdasarkan timestamp (terlama ke terbaru)
+      // Urutkan history berdasarkan timestamp
       _dataHistory.sort((a, b) {
         final sensorA = a['sensor'] as SensorData;
         final sensorB = b['sensor'] as SensorData;
         return sensorA.timestamp.compareTo(sensorB.timestamp);
       });
       
-      print('📈 History updated: ${_dataHistory.length} total data points');
+      // Batasi history untuk menghindari memory overflow
+      _cleanupOldData();
       
-      // Debug: Info tentang data terbaru
-      if (_dataHistory.length % 10 == 0) { // Log setiap 10 data baru
-        final oldest = (_dataHistory.first['sensor'] as SensorData).timestamp;
-        final latest = (_dataHistory.last['sensor'] as SensorData).timestamp;
-        final duration = latest.difference(oldest);
-        print('📊 Current data range: ${duration.inHours}h ${duration.inMinutes.remainder(60)}m');
+      if (kDebugMode) {
+        print('📈 ADDED sequential data - Total: ${_dataHistory.length}');
       }
     } else {
-      // Data sudah ada, update dengan data baru
+      // Update data existing
       _dataHistory[existingIndex] = newData;
-      print('🔄 Updated existing data point at index $existingIndex');
+      if (kDebugMode) {
+        print('🔄 UPDATED existing sequential data');
+      }
+    }
+  }
+
+  // Method untuk cleanup data lama
+  void _cleanupOldData() {
+    if (_dataHistory.length > MAX_HISTORY_LENGTH) {
+      _dataHistory = _dataHistory.sublist(_dataHistory.length - (MAX_HISTORY_LENGTH ~/ 2));
+      if (kDebugMode) {
+        print('🧹 Cleaned up old history data, now: ${_dataHistory.length} records');
+      }
     }
   }
 
   // Method untuk refresh data historis (load ulang semua data)
   Future<void> refreshHistoricalData() async {
-    print('🔄 Manual refresh: Loading all historical data...');
+    if (kDebugMode) {
+      print('🔄 Manual refresh: Loading all historical data...');
+    }
     await _loadHistoricalData();
+  }
+
+  // Method untuk memaksa update data terbaru
+  Future<void> forceRefresh() async {
+    try {
+      _isLoading = true;
+      notifyListeners();
+      
+      // Fetch data terbaru langsung
+      final newData = await _sensorRepository.fetchInitialData();
+      
+      _latestSensorData = newData['sensor'] as SensorData;
+      _latestDeviceStatus = newData['device'] as DeviceStatus;
+      _lastDataTimestamp = _latestSensorData!.timestamp;
+      
+      // Update history
+      _addSequentialToHistory(newData);
+      
+      _isLoading = false;
+      _isConnected = true;
+      _error = null;
+      notifyListeners();
+      
+      if (kDebugMode) {
+        print('✅ Force refresh completed');
+      }
+      
+    } catch (e) {
+      _error = 'Refresh failed: $e';
+      _isLoading = false;
+      notifyListeners();
+      if (kDebugMode) {
+        print('❌ Force refresh error: $e');
+      }
+    }
   }
 
   // Method untuk mendapatkan statistik data
@@ -190,6 +279,7 @@ class SensorProvider with ChangeNotifier {
         'timeRange': 'No data',
         'avgTemperature': 0,
         'avgHumidity': 0,
+        'lastTimestamp': null,
       };
     }
 
@@ -217,10 +307,11 @@ class SensorProvider with ChangeNotifier {
       'avgHumidity': avgHumidity,
       'oldestData': oldest,
       'latestData': latest,
+      'lastTimestamp': _lastDataTimestamp,
     };
   }
 
-  // Method untuk mendapatkan data dalam rentang waktu tertentu (opsional)
+  // Method untuk mendapatkan data dalam rentang waktu tertentu
   List<Map<String, dynamic>> getDataInTimeRange(DateTime start, DateTime end) {
     return _dataHistory.where((data) {
       final sensor = data['sensor'] as SensorData;
@@ -231,7 +322,10 @@ class SensorProvider with ChangeNotifier {
   // Method untuk clear data history (opsional, untuk debugging)
   void clearHistory() {
     _dataHistory.clear();
-    print('🗑️ Cleared all history data');
+    _lastDataTimestamp = null;
+    if (kDebugMode) {
+      print('🗑️ Cleared all history data');
+    }
     notifyListeners();
   }
 
@@ -244,6 +338,7 @@ class SensorProvider with ChangeNotifier {
     _dataHistory.clear();
     _latestSensorData = null;
     _latestDeviceStatus = null;
+    _lastDataTimestamp = null;
     notifyListeners();
     
     _sensorRepository.dispose();
